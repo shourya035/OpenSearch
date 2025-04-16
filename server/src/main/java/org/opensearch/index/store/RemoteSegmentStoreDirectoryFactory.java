@@ -30,6 +30,7 @@ import java.util.function.Supplier;
 
 import static org.opensearch.index.remote.RemoteStoreEnums.DataCategory.SEGMENTS;
 import static org.opensearch.index.remote.RemoteStoreEnums.DataType.DATA;
+import static org.opensearch.index.remote.RemoteStoreEnums.DataType.MERGED_SEGMENT_MD;
 import static org.opensearch.index.remote.RemoteStoreEnums.DataType.METADATA;
 
 /**
@@ -100,6 +101,20 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
             BlobPath mdPath = pathStrategy.generatePath(mdPathInput);
             RemoteDirectory metadataDirectory = new RemoteDirectory(blobStoreRepository.blobStore().blobContainer(mdPath));
 
+            RemoteStorePathStrategy.ShardDataPathInput mergedSegmentMdPathInput = RemoteStorePathStrategy.ShardDataPathInput.builder()
+                .basePath(repositoryBasePath)
+                .indexUUID(indexUUID)
+                .shardId(shardIdStr)
+                .dataCategory(SEGMENTS)
+                .dataType(MERGED_SEGMENT_MD)
+                .fixedPrefix(segmentsPathFixedPrefix)
+                .build();
+            // Derive the path for metadata directory of SEGMENTS
+            BlobPath mergedSegmentMdPath = pathStrategy.generatePath(mergedSegmentMdPathInput);
+            RemoteDirectory mergedSegmentMdDirectory = new RemoteDirectory(
+                blobStoreRepository.blobStore().blobContainer(mergedSegmentMdPath)
+            );
+
             // The path for lock is derived within the RemoteStoreLockManagerFactory
             RemoteStoreLockManager mdLockManager = RemoteStoreLockManagerFactory.newLockManager(
                 repositoriesService.get(),
@@ -110,7 +125,14 @@ public class RemoteSegmentStoreDirectoryFactory implements IndexStorePlugin.Dire
                 segmentsPathFixedPrefix
             );
 
-            return new RemoteSegmentStoreDirectory(dataDirectory, metadataDirectory, mdLockManager, threadPool, shardId);
+            return new RemoteSegmentStoreDirectory(
+                dataDirectory,
+                metadataDirectory,
+                mdLockManager,
+                mergedSegmentMdDirectory,
+                threadPool,
+                shardId
+            );
         } catch (RepositoryMissingException e) {
             throw new IllegalArgumentException("Repository should be created before creating index with remote_store enabled setting", e);
         }

@@ -71,7 +71,8 @@ public class RemoteStoreEnums {
     public enum DataType {
         DATA("data"),
         METADATA("metadata"),
-        LOCK_FILES("lock_files");
+        LOCK_FILES("lock_files"),
+        MERGED_SEGMENT_MD("merged_segment_md");
 
         private final String name;
 

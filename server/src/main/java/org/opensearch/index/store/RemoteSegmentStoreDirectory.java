@@ -23,6 +23,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.Version;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.UUIDs;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
@@ -37,6 +38,7 @@ import org.opensearch.index.store.lockmanager.FileLockInfo;
 import org.opensearch.index.store.lockmanager.RemoteStoreCommitLevelLockManager;
 import org.opensearch.index.store.lockmanager.RemoteStoreLockManager;
 import org.opensearch.index.store.lockmanager.RemoteStoreMetadataLockManager;
+import org.opensearch.index.store.remote.metadata.RemoteMergedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadataHandlerFactory;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
@@ -48,6 +50,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.NoSuchFileException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -96,6 +99,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
     private final ThreadPool threadPool;
 
+    private final RemoteDirectory mergedSegmentMdDirectory;
+
     /**
      * Keeps track of local segment filename to uploaded filename along with other attributes like checksum.
      * This map acts as a cache layer for uploaded segment filenames which helps avoid calling listAll() each time.
@@ -128,6 +133,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         RemoteDirectory remoteDataDirectory,
         RemoteDirectory remoteMetadataDirectory,
         RemoteStoreLockManager mdLockManager,
+        @Nullable RemoteDirectory mergedSegmentMdDirectory,
         ThreadPool threadPool,
         ShardId shardId
     ) throws IOException {
@@ -138,7 +144,9 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         this.threadPool = threadPool;
         this.metadataFilePinnedTimestampMap = new HashMap<>();
         this.logger = Loggers.getLogger(getClass(), shardId);
+        this.mergedSegmentMdDirectory = mergedSegmentMdDirectory;
         init();
+        clearMergedSegmentMetadata();
     }
 
     /**
@@ -733,6 +741,37 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         }
     }
 
+    public void uploadMergedSegmentMetadata(RemoteMergedSegmentMetadata remoteMergedSegmentMetadata, Directory storeDirectory)
+        throws IOException {
+        synchronized (this) {
+            String mergedMdFileName = remoteMergedSegmentMetadata.getAllocationId()
+                + "_"
+                + remoteMergedSegmentMetadata.getPrimaryTerm()
+                + "_"
+                + remoteMergedSegmentMetadata.getMergedSegmentId()
+                + "_merged_segment_metadata";
+            try {
+                try (IndexOutput indexOutput = storeDirectory.createOutput(mergedMdFileName, IOContext.DEFAULT)) {
+                    remoteMergedSegmentMetadata.write(indexOutput);
+                }
+                storeDirectory.sync(Collections.singleton(mergedMdFileName));
+                mergedSegmentMdDirectory.copyFrom(storeDirectory, mergedMdFileName, mergedMdFileName, IOContext.DEFAULT);
+            } finally {
+                tryAndDeleteLocalFile(mergedMdFileName, storeDirectory);
+            }
+        }
+    }
+
+    public void clearMergedSegmentMetadata() throws IOException {
+        String[] currentMergedSegmentMdFiles = mergedSegmentMdDirectory.listAll();
+        if (currentMergedSegmentMdFiles.length != 0) {
+            logger.info("Clearing off existing mergedSegmentMdFile : {}" + Arrays.toString(currentMergedSegmentMdFiles));
+            for (String mdFile : currentMergedSegmentMdFiles) {
+                mergedSegmentMdDirectory.deleteFile(mdFile);
+            }
+        }
+    }
+
     /**
      * Parses the provided SegmentInfos to retrieve a mapping of the provided segment files to
      * the respective Lucene major version that wrote the segments
@@ -1067,6 +1106,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             remoteDataDirectory.delete();
             remoteMetadataDirectory.delete();
             mdLockManager.delete();
+            mergedSegmentMdDirectory.delete();
         } catch (Exception e) {
             logger.error("Exception occurred while deleting directory", e);
             return false;
@@ -1076,6 +1116,8 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
     @Override
     public void close() throws IOException {
-        deleteStaleSegmentsAsync(0, ActionListener.wrap(r -> deleteIfEmpty(), e -> logger.error("Failed to cleanup remote directory")));
+        deleteStaleSegmentsAsync(0, ActionListener.wrap(r -> {
+            deleteIfEmpty();
+        }, e -> logger.error("Failed to cleanup remote directory")));
     }
 }
