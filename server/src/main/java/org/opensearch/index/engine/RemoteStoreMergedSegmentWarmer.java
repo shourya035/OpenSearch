@@ -43,17 +43,21 @@ import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.util.StringHelper;
+import org.apache.lucene.util.Version;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ReplicationGroup;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory.UploadedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteMergedSegmentMetadata;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -70,6 +74,8 @@ public class RemoteStoreMergedSegmentWarmer implements IndexWriter.IndexReaderWa
     private final IndexShard indexShard;
     private final Directory storeDirectory;
     private final RemoteSegmentStoreDirectory remoteSegmentStoreDirectory;
+
+    private static final long WAIT_TIME_BUFFER_IN_MS = 3000L;
 
     public RemoteStoreMergedSegmentWarmer(
         TransportService transportService,
@@ -90,31 +96,39 @@ public class RemoteStoreMergedSegmentWarmer implements IndexWriter.IndexReaderWa
         SegmentCommitInfo segmentCommitInfo = ((SegmentReader) leafReader).getSegmentInfo();
         Collection<String> filesAfterMerge = segmentCommitInfo.files();
         String mergedSegmentId = StringHelper.idToString(segmentCommitInfo.getId());
+        long startTime = System.currentTimeMillis();
         // Upload files generated from merge to remote store
-        long timeTakenForUpload = uploadNewSegments(filesAfterMerge);
+        List<UploadedSegmentMetadata> uploadedSegments = uploadNewSegments(filesAfterMerge, segmentCommitInfo.info.getVersion());
+        long timeTakenForUpload = System.currentTimeMillis() - startTime;
         // Log time taken
         logger.info("Time taken to upload merged segments: {} ms", timeTakenForUpload);
-        writeCheckpointsForReplica(filesAfterMerge, mergedSegmentId);
-
+        writeCheckpointsForReplica(uploadedSegments, mergedSegmentId);
+        waitForReplicaToCatchUp(timeTakenForUpload);
     }
 
-    long uploadNewSegments(Collection<String> localSegmentsPostMerge) {
+    List<UploadedSegmentMetadata> uploadNewSegments(
+        Collection<String> localSegmentsPostMerge,
+        Version version
+    ) {
+        List<UploadedSegmentMetadata> uploadedSegmentMetadata = new ArrayList<>();
         ActionListener<Void> aggregatedListener = ActionListener.wrap(resp -> {}, ex -> {
             logger.warn(() -> new ParameterizedMessage("Exception: [{}] while uploading segment files", ex), ex);
             if (ex instanceof CorruptIndexException) {
                 indexShard.failShard(ex.getMessage(), ex);
             }
         });
-        long startTime = System.currentTimeMillis();
         localSegmentsPostMerge.forEach(src -> {
             logger.debug("Copying over segment {} to remote store", src);
             remoteSegmentStoreDirectory.copyFrom(storeDirectory, src, IOContext.DEFAULT, aggregatedListener, true);
+            UploadedSegmentMetadata metadata = remoteSegmentStoreDirectory.getSegmentsUploadedToRemoteStore().get(src);
+            metadata.setWrittenByMajor(version.major);
+            uploadedSegmentMetadata.add(metadata);
         });
-        return System.currentTimeMillis() - startTime;
+        return uploadedSegmentMetadata;
     }
 
     void writeCheckpointsForReplica(
-        Collection<String> localSegmentsPostMerge,
+        List<UploadedSegmentMetadata> uploadedSegmentsMetadata,
         String mergedSegmentId
     ) throws IOException {
         long primaryTerm = indexShard.getOperationPrimaryTerm();
@@ -124,13 +138,18 @@ public class RemoteStoreMergedSegmentWarmer implements IndexWriter.IndexReaderWa
             .filter(aId -> replicationGroup.getRoutingTable().primaryShard().allocationId().getId().equals(aId) == false)
             .collect(Collectors.toSet());
         for (String aId : inSyncReplicaAllocationIds) {
-            RemoteMergedSegmentMetadata remoteMergedSegmentMetadata = RemoteMergedSegmentMetadata.builder()
-                .primaryTerm(primaryTerm)
-                .allocationId(aId)
-                .files(Set.copyOf(localSegmentsPostMerge))
-                .mergedSegmentId(mergedSegmentId)
-                .build();
+            RemoteMergedSegmentMetadata remoteMergedSegmentMetadata = new RemoteMergedSegmentMetadata(primaryTerm, uploadedSegmentsMetadata, aId, mergedSegmentId);
             remoteSegmentStoreDirectory.uploadMergedSegmentMetadata(remoteMergedSegmentMetadata, storeDirectory);
+        }
+    }
+
+    void waitForReplicaToCatchUp(long waitTime) {
+        try {
+            long waitFor = waitTime + WAIT_TIME_BUFFER_IN_MS;
+            logger.info("Waiting for {} ms for replica to sync files from remote", waitFor);
+            Thread.sleep(waitFor);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
         }
     }
 }

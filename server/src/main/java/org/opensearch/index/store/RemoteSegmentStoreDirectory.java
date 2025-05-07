@@ -169,6 +169,11 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
         return remoteSegmentMetadata;
     }
 
+    public void reloadFromMergedMd(List<UploadedSegmentMetadata> uploadedSegmentMetadata) {
+        logger.info("Appending merged segments to segmentsUploadedToRemoteStore");
+        uploadedSegmentMetadata.forEach(md -> this.segmentsUploadedToRemoteStore.put(md.originalFilename, md));
+    }
+
     /**
      * Initializes the cache to a specific commit which keeps track of all the segment files uploaded to the
      * remote segment store.
@@ -290,7 +295,7 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
          */
         private int writtenByMajor;
 
-        UploadedSegmentMetadata(String originalFilename, String uploadedFilename, String checksum, long length) {
+        public UploadedSegmentMetadata(String originalFilename, String uploadedFilename, String checksum, long length) {
             this.originalFilename = originalFilename;
             this.uploadedFilename = uploadedFilename;
             this.checksum = checksum;
@@ -331,6 +336,10 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
 
         public String getOriginalFilename() {
             return originalFilename;
+        }
+
+        public String getUploadedFilename() {
+            return uploadedFilename;
         }
 
         public void setWrittenByMajor(int writtenByMajor) {
@@ -1099,6 +1108,34 @@ public final class RemoteSegmentStoreDirectory extends FilterDirectory implement
             return false;
         }
         return delete();
+    }
+
+    public Collection<String> listMergedSegmentMdFiles(String allocationId, long primaryTerm) throws IOException {
+        return mergedSegmentMdDirectory.listFilesByPrefix(
+            allocationId + "_" + primaryTerm
+        );
+    }
+
+    public List<RemoteMergedSegmentMetadata> getMergedSegmentMd(String allocationId, long primaryTerm) throws IOException {
+        Collection<String> mergedMdFiles = listMergedSegmentMdFiles(allocationId, primaryTerm);
+        List<RemoteMergedSegmentMetadata> mergedSegmentMetadata = new ArrayList<>();
+        mergedMdFiles.forEach(file -> {
+            try (InputStream inputStream = mergedSegmentMdDirectory.getBlobStream(file)) {
+                byte[] fileBytes = inputStream.readAllBytes();
+                mergedSegmentMetadata.add(RemoteMergedSegmentMetadata.read(new ByteArrayIndexInput(file, fileBytes)));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        return mergedSegmentMetadata;
+    }
+
+    public void deleteMergedSegmentMd(String allocationId, long primaryTerm) throws IOException {
+        Collection<String> mergedMdFiles = listMergedSegmentMdFiles(allocationId, primaryTerm);
+        for (String file: mergedMdFiles) {
+            logger.info("Deleting merged segment MD file {}", file);
+            mergedSegmentMdDirectory.deleteFile(file);
+        }
     }
 
     public boolean delete() {

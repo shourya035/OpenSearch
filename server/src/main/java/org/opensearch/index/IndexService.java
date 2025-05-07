@@ -87,6 +87,7 @@ import org.opensearch.index.seqno.RetentionLeaseSyncer;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardClosedException;
+import org.opensearch.index.shard.IndexShardState;
 import org.opensearch.index.shard.IndexingOperationListener;
 import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.index.shard.ShardNotFoundException;
@@ -96,6 +97,7 @@ import org.opensearch.index.similarity.SimilarityService;
 import org.opensearch.index.store.RemoteSegmentStoreDirectoryFactory;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.remote.filecache.FileCache;
+import org.opensearch.index.store.remote.metadata.RemoteMergedSegmentMetadata;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogFactory;
 import org.opensearch.indices.RemoteStoreSettings;
@@ -176,6 +178,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private volatile AsyncGlobalCheckpointTask globalCheckpointTask;
     private volatile AsyncRetentionLeaseSyncTask retentionLeaseSyncTask;
     private volatile AsyncReplicationTask asyncReplicationTask;
+    private volatile AsyncMergedSegmentDownloadTask asyncMergedSegmentDownloadTask;
 
     // don't convert to Setting<> and register... we only set this in tests and register via a plugin
     private final String INDEX_TRANSLOG_RETENTION_CHECK_INTERVAL_SETTING = "index.translog.retention.check_interval";
@@ -334,6 +337,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.fileCache = fileCache;
         this.replicator = replicator;
         this.segmentReplicationStatsProvider = segmentReplicationStatsProvider;
+        this.asyncMergedSegmentDownloadTask = new AsyncMergedSegmentDownloadTask(this);
         indexSettings.setDefaultMaxMergesAtOnce(clusterDefaultMaxMergeAtOnceSupplier.get());
         updateFsyncTaskIfNecessary();
         synchronized (refreshMutex) {
@@ -1350,6 +1354,21 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         return clusterDefaultRefreshIntervalSupplier.get();
     }
 
+    public void downloadMergedSegments() throws Exception {
+        for (IndexShard shard: this.shards.values()) {
+            if (shard.isPrimaryMode() == false && shard.state() == IndexShardState.STARTED) {
+                List<RemoteMergedSegmentMetadata> mergedMdFiles = shard.fetchMergedSegmentMd();
+                if (mergedMdFiles.isEmpty() == false) {
+                    logger.info("Found merged MD files, downloading...");
+                    for (RemoteMergedSegmentMetadata md: mergedMdFiles) {
+                        shard.downloadMergedSegmentFiles(md);
+                    }
+                    shard.clearMergedSegmentMd();
+                }
+            }
+        }
+    }
+
     /**
      * Base asynchronous task
      *
@@ -1457,6 +1476,21 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         @Override
         protected boolean mustReschedule() {
             return indexSettings.isSegRepEnabledOrRemoteNode() && super.mustReschedule();
+        }
+    }
+
+    final class AsyncMergedSegmentDownloadTask extends BaseAsyncTask {
+        AsyncMergedSegmentDownloadTask(IndexService indexService) {
+            super(indexService, TimeValue.timeValueSeconds(1));
+        }
+
+        @Override
+        protected void runInternal() {
+            try {
+                indexService.downloadMergedSegments();
+            } catch (Exception e) {
+                logger.error("Unable to download merged segments {}", e);
+            }
         }
     }
 

@@ -170,11 +170,13 @@ import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.PrimaryReplicaSyncer.ResyncTask;
 import org.opensearch.index.similarity.SimilarityService;
 import org.opensearch.index.store.RemoteSegmentStoreDirectory;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory.UploadedSegmentMetadata;
 import org.opensearch.index.store.RemoteStoreFileDownloader;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.store.Store.MetadataSnapshot;
 import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.index.store.StoreStats;
+import org.opensearch.index.store.remote.metadata.RemoteMergedSegmentMetadata;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.index.translog.RemoteBlobStoreInternalTranslogFactory;
 import org.opensearch.index.translog.RemoteFsTranslog;
@@ -5167,7 +5169,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         // are uploaded to the remote segment store.
         RemoteSegmentMetadata remoteSegmentMetadata = remoteDirectory.init();
 
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments = remoteDirectory
+        Map<String, UploadedSegmentMetadata> uploadedSegments = remoteDirectory
             .getSegmentsUploadedToRemoteStore()
             .entrySet()
             .stream()
@@ -5244,7 +5246,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             remoteDirectory.init();
             remoteStore.incRef();
         }
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments = sourceRemoteDirectory
+        Map<String, UploadedSegmentMetadata> uploadedSegments = sourceRemoteDirectory
             .getSegmentsUploadedToRemoteStore();
         store.incRef();
         try {
@@ -5318,7 +5320,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         Directory storeDirectory,
         RemoteSegmentStoreDirectory sourceRemoteDirectory,
         RemoteSegmentStoreDirectory targetRemoteDirectory,
-        Map<String, RemoteSegmentStoreDirectory.UploadedSegmentMetadata> uploadedSegments,
+        Map<String, UploadedSegmentMetadata> uploadedSegments,
         boolean overrideLocal,
         final Runnable onFileSync
     ) throws IOException {
@@ -5500,6 +5502,34 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 ingestionEngine.resumeIngestion();
             }
         }
+    }
+
+    public List<RemoteMergedSegmentMetadata> fetchMergedSegmentMd() throws IOException {
+        RemoteSegmentStoreDirectory remoteDirectory = getRemoteDirectory();
+        return remoteDirectory.getMergedSegmentMd(this.shardRouting.allocationId().getId(), this.getOperationPrimaryTerm());
+    }
+
+    public void downloadMergedSegmentFiles(RemoteMergedSegmentMetadata mergedSegmentMetadata) throws IOException, InterruptedException {
+        RemoteSegmentStoreDirectory remoteDirectory = getRemoteDirectory();
+        RemoteStoreFileDownloader downloader = getFileDownloader();
+        Directory localDirectory = this.store.directory();
+        List<UploadedSegmentMetadata> uploadedSegmentsMetadata = mergedSegmentMetadata.getUploadedSegmentsMetadata();
+        List<String> filesToDownload = new ArrayList<>();
+        for (UploadedSegmentMetadata md: uploadedSegmentsMetadata) {
+            if (localDirectoryContains(localDirectory, md.getOriginalFilename(), Long.parseLong(md.getChecksum())) == false) {
+                filesToDownload.add(md.getOriginalFilename());
+            }
+        }
+        if (filesToDownload.isEmpty() == false) {
+            remoteDirectory.reloadFromMergedMd(uploadedSegmentsMetadata);
+            downloader.download(remoteDirectory, localDirectory, null,filesToDownload, () -> {});
+            logger.info("Successfully downloaded {} merged segment files on replica", uploadedSegmentsMetadata);
+        }
+    }
+
+    public void clearMergedSegmentMd() throws IOException {
+        RemoteSegmentStoreDirectory remoteDirectory = getRemoteDirectory();
+        remoteDirectory.deleteMergedSegmentMd(this.shardRouting.allocationId().getId(), this.getOperationPrimaryTerm());
     }
 
     /**
