@@ -1479,6 +1479,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         }
     }
 
+    // Async task running every one second (needs to be configurable) which fetches metadata
+    // and downloads the merged segments from remote store
     final class AsyncMergedSegmentDownloadTask extends BaseAsyncTask {
         AsyncMergedSegmentDownloadTask(IndexService indexService) {
             super(indexService, TimeValue.timeValueSeconds(1));
@@ -1487,7 +1489,9 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         @Override
         protected void runInternal() {
             try {
-                indexService.downloadMergedSegments();
+                if (FeatureFlags.isEnabled(FeatureFlags.MERGED_SEGMENT_WARMER_EXPERIMENTAL_SETTING)) {
+                    indexService.downloadMergedSegments();
+                }
             } catch (Exception e) {
                 logger.error("Unable to download merged segments {}", e);
             }

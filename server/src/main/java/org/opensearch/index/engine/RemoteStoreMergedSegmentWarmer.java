@@ -102,7 +102,11 @@ public class RemoteStoreMergedSegmentWarmer implements IndexWriter.IndexReaderWa
         long timeTakenForUpload = System.currentTimeMillis() - startTime;
         // Log time taken
         logger.info("Time taken to upload merged segments: {} ms", timeTakenForUpload);
+        // Write checkpoint files to remote store
         writeCheckpointsForReplica(uploadedSegments, mergedSegmentId);
+        // Wait for replica to read and download the merged segment files
+        // Implementation for reading the metadata and download the segment files are under
+        // IndexService#AsyncMergedSegmentDownloadTask
         waitForReplicaToCatchUp(timeTakenForUpload);
     }
 
