@@ -43,6 +43,7 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlocks;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
+import org.opensearch.common.ValidationException;
 import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
@@ -1489,6 +1490,23 @@ public class RestoreSnapshotIT extends AbstractSnapshotIntegTestCase {
         );
         assertTrue(exception.getMessage().contains("cannot modify setting [index.remote_store.enabled]" + " on restore"));
 
+    }
+
+    public void testInvalidRenameReplacementPattern() {
+        setupSnapshotRestore();
+
+        ValidationException exception = expectThrows(
+            ValidationException.class,
+            () -> client().admin()
+                .cluster()
+                .prepareRestoreSnapshot(snapshotRepo, snapshotName1)
+                .setWaitForCompletion(false)
+                .setIndices(index)
+                .setRenamePattern(index)
+                .setRenameReplacement("a".repeat(10000))
+                .get()
+        );
+        assertTrue(exception.getMessage().contains("rename replacement string size exceeds max allowed size"));
     }
 
     protected Settings.Builder getIndexSettings(int numOfShards, int numOfReplicas) {

@@ -36,6 +36,7 @@ import org.opensearch.Version;
 import org.opensearch.action.ActionRequestValidationException;
 import org.opensearch.action.support.IndicesOptions;
 import org.opensearch.action.support.clustermanager.ClusterManagerNodeRequest;
+import org.opensearch.cluster.metadata.MetadataCreateIndexService;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.logging.DeprecationLogger;
@@ -257,6 +258,16 @@ public class RestoreSnapshotRequest extends ClusterManagerNodeRequest<RestoreSna
         }
         if (ignoreIndexSettings == null) {
             validationException = addValidationError("ignoreIndexSettings are missing", validationException);
+        }
+        if (Strings.isNullOrEmpty(renameReplacement) == false
+            && renameReplacement.getBytes().length > MetadataCreateIndexService.MAX_INDEX_NAME_BYTES) {
+            validationException = addValidationError(
+                String.format(
+                    "rename_replacement string size exceeds max allowed size of %s bytes",
+                    MetadataCreateIndexService.MAX_INDEX_NAME_BYTES
+                ),
+                validationException
+            );
         }
         return validationException;
     }
