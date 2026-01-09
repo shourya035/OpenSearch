@@ -1495,6 +1495,9 @@ public class RestoreSnapshotIT extends AbstractSnapshotIntegTestCase {
     public void testInvalidRenameReplacementPattern() {
         setupSnapshotRestore();
 
+        // b - 100000 times
+        String invalidRenameReplacementString = "b".repeat(100000);
+
         ValidationException exception = expectThrows(
             ValidationException.class,
             () -> client().admin()
@@ -1503,10 +1506,10 @@ public class RestoreSnapshotIT extends AbstractSnapshotIntegTestCase {
                 .setWaitForCompletion(false)
                 .setIndices(index)
                 .setRenamePattern(index)
-                .setRenameReplacement("a".repeat(10000))
+                .setRenameReplacement(invalidRenameReplacementString)
                 .get()
         );
-        assertTrue(exception.getMessage().contains("rename replacement string size exceeds max allowed size"));
+        assertTrue(exception.getMessage().contains("rename_replacement string size exceeds max allowed size"));
     }
 
     protected Settings.Builder getIndexSettings(int numOfShards, int numOfReplicas) {
